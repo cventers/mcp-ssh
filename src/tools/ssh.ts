@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { createHash } from 'crypto';
+import logger, { auditLogger } from '../logger.js';
 
 export class SshMCP {
   private server: McpServer;
@@ -218,6 +219,16 @@ export class SshMCP {
           // 记录活跃连接
           this.activeConnections.set(connection.id, new Date());
           
+          // 审计日志 - 连接成功
+          auditLogger.connectionCreated(connection.id, params.host, params.username, true);
+          auditLogger.sshConnected(connection.id, params.host, params.username, true);
+          logger.info('SSH connection created successfully', {
+            connectionId: connection.id,
+            host: params.host,
+            username: params.username,
+            name: params.name
+          });
+          
           return {
             content: [{
               type: "text",
@@ -225,10 +236,20 @@ export class SshMCP {
             }]
           };
         } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          
+          // 审计日志 - 连接失败
+          auditLogger.connectionCreated('unknown', params.host, params.username, false, errorMessage);
+          logger.error('SSH connection failed', {
+            host: params.host,
+            username: params.username,
+            error: errorMessage
+          });
+          
           return {
             content: [{
               type: "text",
-              text: `连接失败: ${error instanceof Error ? error.message : String(error)}`
+              text: `连接失败: ${errorMessage}`
             }],
             isError: true
           };
@@ -578,7 +599,23 @@ export class SshMCP {
           const isTmuxCommand = isTmuxSendKeys || isTmuxCapture || isTmuxNewSession || isTmuxKillSession || isTmuxHasSession;
           
           // 执行命令
+          const startTime = Date.now();
           const result = await this.sshService.executeCommand(connectionId, command, { cwd, timeout });
+          const duration = Date.now() - startTime;
+          
+          // 审计日志 - 命令执行
+          const success = result.code === 0;
+          const errorMessage = result.stderr || (result.code !== 0 ? `Command exited with code ${result.code}` : undefined);
+          auditLogger.commandExecuted(connectionId, command, cwd, success, duration, errorMessage);
+          
+          logger.info('Command executed', {
+            connectionId,
+            command: command.substring(0, 100) + (command.length > 100 ? '...' : ''),
+            cwd,
+            exitCode: result.code,
+            duration,
+            success
+          });
           
           // 构建输出
           let output = '';
@@ -611,6 +648,13 @@ export class SshMCP {
               
               // 对于 send-keys 命令
               if (isTmuxSendKeys && sessionName && beforeCapture?.stdout) {
+                // 审计日志 - tmux命令发送
+                const sendKeysMatch = command.match(tmuxSendKeysRegex);
+                if (sendKeysMatch) {
+                  const sentCommand = sendKeysMatch[2];
+                  auditLogger.tmuxCommandSent(connectionId, sessionName, sentCommand, success);
+                }
+                
                 // 等待一段时间让命令执行完成
                 await new Promise(resolve => setTimeout(resolve, 300));
                 
@@ -744,9 +788,14 @@ export class SshMCP {
                     { timeout: 3000 }
                   );
                   
-                  if (checkResult.stdout && checkResult.stdout.includes("会话存在")) {
+                  const sessionSuccess = checkResult.stdout && checkResult.stdout.includes("会话存在");
+                  if (sessionSuccess) {
                     output += `\n会话已成功启动并在后台运行`;
                   }
+                  
+                  // 审计日志 - tmux会话创建
+                  auditLogger.tmuxSessionCreated(connectionId, sessionName, !!sessionSuccess, 
+                    sessionSuccess ? undefined : 'Session creation verification failed');
                 }
               }
               // 对于 kill-session 命令
@@ -755,6 +804,9 @@ export class SshMCP {
                 if (match) {
                   const sessionName = match[1];
                   output = `已终止tmux会话 "${sessionName}"`;
+                  
+                  // 审计日志 - tmux会话终止
+                  auditLogger.tmuxSessionKilled(connectionId, sessionName, success);
                 }
               }
               // 对于 has-session 命令
@@ -1213,7 +1265,21 @@ export class SshMCP {
           // 更新活跃时间
           this.activeConnections.set(connectionId, new Date());
           
+          // 获取文件大小用于审计
+          const stats = fs.statSync(localPath);
+          const fileSize = stats.size;
+          
+          // 审计日志 - 文件上传开始
+          auditLogger.fileUploadStarted(connectionId, localPath, remotePath, fileSize, true);
+          logger.info('File upload started', {
+            connectionId,
+            localFile: path.basename(localPath),
+            remotePath,
+            fileSize
+          });
+          
           // 上传文件并获取传输ID
+          const transferStartTime = Date.now();
           const transferInfo = await this.sshService.uploadFile(connectionId, localPath, remotePath);
           const transferId = transferInfo.id;
           
@@ -1233,8 +1299,20 @@ export class SshMCP {
           try {
             // 获取最终结果
             const result = this.sshService.getTransferInfo(transferId);
+            const transferDuration = Date.now() - transferStartTime;
             
             if (result && result.status === 'failed') {
+              // 审计日志 - 文件上传失败
+              auditLogger.fileUploadCompleted(connectionId, localPath, remotePath, fileSize, transferDuration, false, result.error);
+              logger.error('File upload failed', {
+                connectionId,
+                localFile: path.basename(localPath),
+                remotePath,
+                fileSize,
+                duration: transferDuration,
+                error: result.error
+              });
+              
               return {
                 content: [{
                   type: "text",
@@ -1246,6 +1324,16 @@ export class SshMCP {
             }
             
             const fileName = path.basename(localPath);
+            
+            // 审计日志 - 文件上传成功
+            auditLogger.fileUploadCompleted(connectionId, localPath, remotePath, fileSize, transferDuration, true);
+            logger.info('File upload completed successfully', {
+              connectionId,
+              localFile: fileName,
+              remotePath,
+              fileSize,
+              duration: transferDuration
+            });
             
             return {
               content: [{
@@ -1259,10 +1347,21 @@ export class SshMCP {
             unsubscribe();
           }
         } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          
+          // 审计日志 - 文件上传异常
+          auditLogger.fileUploadStarted(connectionId, localPath, remotePath, 0, false, errorMessage);
+          logger.error('File upload error', {
+            connectionId,
+            localPath,
+            remotePath,
+            error: errorMessage
+          });
+          
           return {
             content: [{
               type: "text",
-              text: `上传文件时出错: ${error instanceof Error ? error.message : String(error)}`
+              text: `上传文件时出错: ${errorMessage}`
             }],
             isError: true
           };
