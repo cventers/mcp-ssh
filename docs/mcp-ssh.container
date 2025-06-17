@@ -1,0 +1,49 @@
+[Unit]
+Description=MCP SSH Service Container
+Documentation=https://github.com/cventers/mcp-ssh
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=localhost/mcp-ssh:latest
+ContainerName=mcp-ssh
+
+# Network configuration - connect to mcp network
+Network=mcp
+
+# Volume mounts for persistent data
+Volume=/opt/mcp-ssh/data:/app/data:Z
+Volume=/opt/mcp-ssh/logs:/app/logs:Z
+Volume=/opt/mcp-ssh/config:/app/config:Z
+
+# Environment variables
+Environment=NODE_ENV=production
+Environment=LOG_LEVEL=info
+Environment=DATA_PATH=/app/data
+
+# Security context
+User=1001:1001
+ReadOnlyRootFilesystem=true
+NoNewPrivileges=true
+
+# Resource limits
+MemoryLimit=512M
+CPUQuota=50%
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Health monitoring
+HealthCmd=python3 -c "import sys; sys.exit(0)"
+HealthInterval=30s
+HealthTimeout=10s
+HealthRetries=3
+
+[Service]
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
