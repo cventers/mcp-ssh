@@ -1,6 +1,10 @@
 # Container Setup for MCP-SSH
 
+**⚠️ DEPRECATED: This systemd/quadlet setup has been replaced by k3s deployment ⚠️**
+
 This guide shows how to run mcp-ssh as a Podman container using Quadlet on the mcp network.
+
+> **Migration Notice**: This quadlet-based deployment is deprecated. Use k3s deployment with ArgoCD instead. See https://github.com/cventers/k3s.git for current deployment methods.
 
 ## Prerequisites
 
